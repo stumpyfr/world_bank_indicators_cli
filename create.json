@@ -1,0 +1,14 @@
+[
+    {
+        "id": "EG.ELC.ACCS.ZS",
+        "name": "Access to electricity (% of population)"
+    },
+    {
+        "id": "SP.POP.TOTL",
+        "name": "Population, total"
+    },
+    {
+        "id" : "NY.GDP.PCAP.CD",
+        "name" : "GDP per capita (current US$)"
+    }
+]
