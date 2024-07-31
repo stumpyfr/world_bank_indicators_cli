@@ -4,18 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"database/sql"
 
 	_ "github.com/marcboeker/go-duckdb"
 	"github.com/spf13/cobra"
-)
-
-const (
-	per_page = 1000
 )
 
 type IndicatorPageInfo struct {
@@ -56,6 +52,8 @@ var csv_output string
 var parquet_output string
 var indicator string
 var date string
+var refresh bool
+var nb_per_page int
 var table_name string
 
 func init() {
@@ -70,12 +68,13 @@ func init() {
 	downloadCmd.MarkFlagRequired("date")
 
 	downloadCmd.Flags().StringVarP(&table_name, "table", "n", "", "Name of the table to store (if database is provided), by default will be the indicator code")
+	downloadCmd.Flags().IntVarP(&nb_per_page, "nb_per_page", "", 1000, "Number of items per page, default is 1000")
+	downloadCmd.Flags().BoolVarP(&refresh, "refresh", "r", false, "Force refresh of the data if the table already exists in the database")
 
 	rootCmd.AddCommand(downloadCmd)
 }
 
 func downloadPage(url string) ([]byte, error) {
-	log.Println("Downloading:", url)
 	resp, err := http.Get(url)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return nil, err
@@ -120,7 +119,7 @@ func parsePage(body []byte) (*IndicatorPageInfo, []Indicator, error) {
 }
 
 func downloadIndicator(indicator_code, date string) ([]Indicator, error) {
-	url := fmt.Sprintf("https://api.worldbank.org/v2/country/all/indicator/%s?format=json&date=%s&per_page=%d", indicator_code, date, per_page)
+	url := fmt.Sprintf("https://api.worldbank.org/v2/country/all/indicator/%s?format=json&date=%s&per_page=%d", indicator_code, date, nb_per_page)
 	payload, err := downloadPage(url)
 	if err != nil {
 		return nil, err
@@ -134,11 +133,13 @@ func downloadIndicator(indicator_code, date string) ([]Indicator, error) {
 		return nil, err
 	}
 	indicators = append(indicators, indicatorPage...)
-	log.Println("Page:", pageInfo.Page, "Pages:", pageInfo.Pages, "Total:", pageInfo.Total)
+	fmt.Println("Page: 1", "Number of page:", pageInfo.Pages, "Total datapoint:", pageInfo.Total)
 
 	// download the other pages
 	for i := 2; i <= pageInfo.Pages; i++ {
-		url := fmt.Sprintf("https://api.worldbank.org/v2/country/all/indicator/%s?format=json&date=%s&per_page=%d&page=%d", indicator_code, date, per_page, i)
+		url := fmt.Sprintf("https://api.worldbank.org/v2/country/all/indicator/%s?format=json&date=%s&per_page=%d&page=%d", indicator_code, date, nb_per_page, i)
+		// fmt.Printf("Downloading page %d...\n", i)
+		fmt.Println("Page:", i, "Number of page:", pageInfo.Pages, "Total datapoint:", pageInfo.Total)
 		payload, err := downloadPage(url)
 		if err != nil {
 			return nil, err
@@ -161,55 +162,72 @@ var downloadCmd = &cobra.Command{
 
 		db, err := sql.Open("duckdb", duckdb_db)
 		if err != nil {
-			log.Fatal(err)
+			fmt.Println(err)
+			os.Exit(1)
 		}
 		defer db.Close()
-
-		indicators, err := downloadIndicator(indicator, date)
-		if err != nil {
-			log.Fatal(err)
-			return
-		}
-
-		_, err = db.Exec(`CREATE TEMPORARY TABLE tmp (name VARCHAR, iso3name VARCHAR, year INTEGER, value DOUBLE)`)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		for _, indicator := range indicators {
-			_, err = db.Exec(`INSERT INTO tmp VALUES (?, ?, ?, ?)`,
-				indicator.Country.Value,
-				indicator.Countryiso3code,
-				indicator.Date,
-				indicator.Value)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
 
 		if table_name == "" {
 			table_name = strings.Replace(indicator, ".", "_", -1)
 		}
 
-		log.Println("Creating table:", table_name)
-		_, err = db.Exec(fmt.Sprintf(`CREATE OR REPLACE TABLE %s AS PIVOT tmp ON year USING SUM(value) GROUP BY name, iso3name`, table_name))
-		if err != nil {
-			log.Fatal(err)
+		// check if in the indicator is already in the database
+		if !refresh {
+			rows, err := db.Query(fmt.Sprintf(`SELECT * FROM %s LIMIT 1`, table_name))
+			if err == nil {
+				rows.Close()
+				fmt.Printf("Table '%s' already exists, use -r to force refresh\n", table_name)
+			}
+		}
+
+		if refresh {
+			indicators, err := downloadIndicator(indicator, date)
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+
+			_, err = db.Exec(`CREATE TEMPORARY TABLE tmp (name VARCHAR, iso3name VARCHAR, year INTEGER, value DOUBLE)`)
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+
+			for _, indicator := range indicators {
+				_, err = db.Exec(`INSERT INTO tmp VALUES (?, ?, ?, ?)`,
+					indicator.Country.Value,
+					indicator.Countryiso3code,
+					indicator.Date,
+					indicator.Value)
+				if err != nil {
+					fmt.Println(err)
+					os.Exit(1)
+				}
+			}
+
+			fmt.Println("Creating table:", table_name)
+			_, err = db.Exec(fmt.Sprintf(`CREATE OR REPLACE TABLE %s AS PIVOT tmp ON year USING SUM(value) GROUP BY name, iso3name`, table_name))
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
 		}
 
 		if csv_output != "" {
-			log.Println("export to csv")
+			fmt.Println("export to csv")
 			_, err = db.Exec(fmt.Sprintf(`COPY %s TO '%s' (HEADER, DELIMITER ',')`, table_name, csv_output))
 			if err != nil {
-				log.Fatal(err)
+				fmt.Println(err)
+				os.Exit(1)
 			}
 		}
 
 		if parquet_output != "" {
-			log.Println("export to parquet")
+			fmt.Println("export to parquet")
 			_, err = db.Exec(fmt.Sprintf(`COPY %s TO '%s' (FORMAT 'parquet')`, table_name, parquet_output))
 			if err != nil {
-				log.Fatal(err)
+				fmt.Println(err)
+				os.Exit(1)
 			}
 		}
 	},

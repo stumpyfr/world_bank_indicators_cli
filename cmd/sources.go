@@ -19,8 +19,6 @@ type PageInfo struct {
 	Pages   string `json:"pages"`
 	PerPage string `json:"per_page"`
 	Total   string `json:"total"`
-	// SourceId    int    `json:"sourceid"`
-	// LastUpdated string `json:"lastupdated"`
 }
 
 // Dataset represents the dataset information in the JSON
