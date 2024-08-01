@@ -50,6 +50,7 @@ type IndicatorPageResponse struct {
 var duckdb_db string
 var csv_output string
 var parquet_output string
+var json_output string
 var indicator string
 var date string
 var refresh bool
@@ -58,8 +59,9 @@ var table_name string
 
 func init() {
 	downloadCmd.Flags().StringVarP(&duckdb_db, "database", "d", "", "DuckDB database, if not provided will use an in-memory database")
-	downloadCmd.Flags().StringVarP(&csv_output, "csv", "", "", "CSV output file")
-	downloadCmd.Flags().StringVarP(&parquet_output, "parquet", "", "", "Parquet output file")
+	downloadCmd.Flags().StringVarP(&csv_output, "csv", "c", "", "CSV output file")
+	downloadCmd.Flags().StringVarP(&parquet_output, "parquet", "p", "", "Parquet output file")
+	downloadCmd.Flags().StringVarP(&json_output, "json", "j", "", "JSON output file")
 
 	downloadCmd.Flags().StringVarP(&indicator, "indicator", "i", "", "Indicator code to download")
 	downloadCmd.MarkFlagRequired("indicator")
@@ -155,10 +157,81 @@ func downloadIndicator(indicator_code, date string) ([]Indicator, error) {
 	return indicators, nil
 }
 
+func manageOutputFiles(db *sql.DB, parquet_output, csv_output, json_output, table_name string) bool {
+	outputted := false
+
+	if csv_output != "" {
+		fmt.Println("Exporting to csv...")
+		_, err := db.Exec(fmt.Sprintf(`COPY %s TO '%s' (HEADER, DELIMITER ',')`, table_name, csv_output))
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		outputted = true
+	}
+
+	if parquet_output != "" {
+		fmt.Println("Exporting to parquet...")
+		_, err := db.Exec(fmt.Sprintf(`COPY %s TO '%s' (FORMAT 'parquet')`, table_name, parquet_output))
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		outputted = true
+	}
+
+	if json_output != "" {
+		fmt.Println("Exporting to json...")
+		db.Exec("INSTALL JSON; LOAD json;")
+		_, err := db.Exec(fmt.Sprintf(`COPY %s TO '%s' (FORMAT 'json')`, table_name, "output.json"))
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		outputted = true
+	}
+
+	return outputted
+}
+
+func refreshData(db *sql.DB, indicator, date, table_name string) {
+	indicators, err := downloadIndicator(indicator, date)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	_, err = db.Exec(`CREATE TEMPORARY TABLE tmp (name VARCHAR, iso3name VARCHAR, year INTEGER, value DOUBLE)`)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	for _, indicator := range indicators {
+		_, err = db.Exec(`INSERT INTO tmp VALUES (?, ?, ?, ?)`,
+			indicator.Country.Value,
+			indicator.Countryiso3code,
+			indicator.Date,
+			indicator.Value)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+	}
+
+	fmt.Println("Creating table:", table_name)
+	_, err = db.Exec(fmt.Sprintf(`CREATE OR REPLACE TABLE %s AS PIVOT tmp ON year USING SUM(value) GROUP BY name, iso3name`, table_name))
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}
+
 var downloadCmd = &cobra.Command{
 	Use:   "dl",
 	Short: "Download an indicator in various format",
 	Run: func(cmd *cobra.Command, args []string) {
+		outputted := false
 
 		db, err := sql.Open("duckdb", duckdb_db)
 		if err != nil {
@@ -166,6 +239,10 @@ var downloadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		defer db.Close()
+
+		if duckdb_db != "" {
+			outputted = true
+		}
 
 		if table_name == "" {
 			table_name = strings.Replace(indicator, ".", "_", -1)
@@ -177,58 +254,20 @@ var downloadCmd = &cobra.Command{
 			if err == nil {
 				rows.Close()
 				fmt.Printf("Table '%s' already exists, use -r to force refresh\n", table_name)
+			} else {
+				refresh = true
 			}
 		}
 
 		if refresh {
-			indicators, err := downloadIndicator(indicator, date)
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(1)
-			}
-
-			_, err = db.Exec(`CREATE TEMPORARY TABLE tmp (name VARCHAR, iso3name VARCHAR, year INTEGER, value DOUBLE)`)
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(1)
-			}
-
-			for _, indicator := range indicators {
-				_, err = db.Exec(`INSERT INTO tmp VALUES (?, ?, ?, ?)`,
-					indicator.Country.Value,
-					indicator.Countryiso3code,
-					indicator.Date,
-					indicator.Value)
-				if err != nil {
-					fmt.Println(err)
-					os.Exit(1)
-				}
-			}
-
-			fmt.Println("Creating table:", table_name)
-			_, err = db.Exec(fmt.Sprintf(`CREATE OR REPLACE TABLE %s AS PIVOT tmp ON year USING SUM(value) GROUP BY name, iso3name`, table_name))
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(1)
-			}
+			refreshData(db, indicator, date, table_name)
 		}
 
-		if csv_output != "" {
-			fmt.Println("export to csv")
-			_, err = db.Exec(fmt.Sprintf(`COPY %s TO '%s' (HEADER, DELIMITER ',')`, table_name, csv_output))
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(1)
-			}
-		}
+		outputted = manageOutputFiles(db, parquet_output, csv_output, json_output, table_name)
 
-		if parquet_output != "" {
-			fmt.Println("export to parquet")
-			_, err = db.Exec(fmt.Sprintf(`COPY %s TO '%s' (FORMAT 'parquet')`, table_name, parquet_output))
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(1)
-			}
+		if !outputted {
+			fmt.Println("No output format specified, please indicate at least one format to export the data (-d, -p or --parquet, -c or --csv)")
+			os.Exit(1)
 		}
 	},
 }

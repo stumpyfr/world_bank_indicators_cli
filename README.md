@@ -17,5 +17,5 @@ To use the CLI, run the following command:
 ```bash
 wbi sources
 wbi indicators --source <source>
-wbi dl -t 2023:2018 -i AG.LND.FRST.K2 -d output.db --csv output.csv --parquet output.parquet
+wbi dl -t 2023:2018 -i AG.LND.FRST.K2 -d output.db --csv output.csv --parquet output.parquet --json output.json
 ```
